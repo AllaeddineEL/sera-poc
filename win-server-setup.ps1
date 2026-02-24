@@ -1,4 +1,4 @@
-<#
+ <#
 .SYNOPSIS
 Installs IIS + HashiCorp Vault (agent mode) on Windows Server.
 
@@ -31,19 +31,16 @@ $ErrorActionPreference = "Stop"
 
 function Write-CertInstallScript {
     @"
-    `$bytes = New-Object byte[] 24
- [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes(`$bytes)
+    `$PfxPasswordPlain = "IISPassword"
 
-    `$PfxPasswordPlain = [System.Text.Encoding]::UTF8.GetString(`$bytes)
-
-Start-Process -FilePath "certutil.exe" `
-    -ArgumentList "-p `$PfxPasswordPlain,`$PfxPasswordPlain -MergePFX $VaultDataDir\$SubDomain-$Domain.cer $VaultDataDir\$SubDomain-$Domain.pfx" `
+Start-Process -FilePath "certutil.exe" ``
+    -ArgumentList "-p `$PfxPasswordPlain,`$PfxPasswordPlain -MergePFX $VaultDataDir\$SubDomain.cer $VaultDataDir\$SubDomain.pfx" ``
     -Wait -NoNewWindow
 
 Import-Module WebAdministration
 
-if (-not (Test-Path `"$VaultDataDir\$SubDomain-$Domain.pfx`")) {
-    throw "PFX not found: $VaultDataDir\$SubDomain-$Domain.pfx"
+if (-not (Test-Path `"$VaultDataDir\$SubDomain.pfx`")) {
+    throw "PFX not found: $VaultDataDir\$SubDomain.pfx"
 }
 
 if (-not (Get-Website -Name `"$SiteName`" -ErrorAction SilentlyContinue)) {
@@ -53,16 +50,21 @@ if (-not (Get-Website -Name `"$SiteName`" -ErrorAction SilentlyContinue)) {
 `$securePwd = ConvertTo-SecureString `$PfxPasswordPlain -AsPlainText -Force
 
 # Import cert to LocalMachine\My
-`$cert = Import-PfxCertificate `
-    -FilePath `"$VaultDataDir\$SubDomain-$Domain.pfx`" `
-    -Password `$securePwd `
-    -CertStoreLocation "Cert:\LocalMachine\My" `
-    -Exportable
+
+`$params = @{
+    FilePath = '$VaultDataDir\$SubDomain.pfx'
+    CertStoreLocation = 'Cert:\LocalMachine\My'
+    Password = `$securePwd
+}
+
+`$cert = Import-PfxCertificate @params
+
 
 if (-not `$cert) {
     throw "Certificate import failed."
 }
 
+Remove-Item -Path `"$VaultDataDir\$SubDomain.pfx`" -Force
 
 # Ensure HTTPS binding exists
 `$binding = Get-WebBinding -Name `"$SiteName`" -Protocol "https" -Port 443 -IPAddress `"$IpAddress`" -HostHeader `"$HostHeader`" -ErrorAction SilentlyContinue
@@ -123,29 +125,41 @@ function Install-Vault {
 }
 
 function Write-DefaultAgentConfig {
+
+$VaultDataDir = $VaultDataDir -replace '\\','/'
+$VaultPKITemplate = $VaultPKITemplate -replace '\\','/'
+$VaultPKIOutput = $VaultPKIOutput -replace '\\','/'
+
+
+
     if (Test-Path $VaultConfigPath) {
         Write-Host "Vault agent config already exists: $VaultConfigPath"
         return
     }
     @"
 {{ with pkiCert "pki_int/issue/win-iis" "common_name=$SubDomain.$Domain" "ttl=2m"}}
-{{ .Data.Key | writeToFile "C:/ProgramData/Vault/$SubDomain-$Domain.key" "" "" "0400"}}
-{{ .Data.CA | writeToFile "C:/ProgramData/Vault/$SubDomain-$Domain.cer" "" "" "0400"}}
-{{ .Data.Cert | writeToFile "C:/ProgramData/Vault/$SubDomain-$Domain.cer" "" "" "0400" "append" }}
+{{ .Data.Cert }}{{ .Data.CA }}{{ .Data.Key }}
+{{ .Data.Key | writeToFile "$VaultDataDir/$SubDomain.key" "" "" "0644" }}
+{{ .Data.Cert | writeToFile "$VaultDataDir/$SubDomain.cer" "" "" "0644" }}
 {{ end }}    
 "@ | Set-Content -Path $VaultPKITemplate -Encoding ASCII
 
     @"
-dcba7c4e-54c2-c4d2-af80-88bbefb18f12
+c831f520-8fa8-d8ac-2435-a22a0a8eea2c
 "@ | Set-Content -Path $VaultAuthPathRoleId -Encoding ASCII
 
     @"
-6c286ced-b90f-5c9b-f5ff-cffebe52ced2
+b3203e5c-f2e6-47ba-2c3a-5157ed816072
 "@ | Set-Content -Path $VaultAuthPathSecretId -Encoding ASCII
 
     @"
 # Update this file for your environment before production use.
-pid_file = "$VaultDataDir\agent.pid"
+
+pid_file = "$VaultDataDir/agent.pid"
+
+log_level = "debug"
+log_file  = "$VaultDataDir/agent.log"
+log_rotate_duration = "10m"
 
 vault {
   address = "$VaultAddr"
@@ -155,14 +169,14 @@ auto_auth {
   method "approle" {
     mount_path = "auth/approle"
     config = {
-      role_id_file_path   = "$VaultDataDir\role_id"
-      secret_id_file_path = "$VaultDataDir\secret_id"
+      role_id_file_path   = "$VaultDataDir/role_id"
+      secret_id_file_path = "$VaultDataDir/secret_id"
     }
   }
 
   sink "file" {
     config = {
-      path = "$VaultDataDir\token"
+      path = "$VaultDataDir/token"
     }
   }
 }
@@ -175,8 +189,8 @@ template {
 source      = "$VaultPKITemplate"
 destination = "$VaultPKIOutput"
     exec {
-        command = ["C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", "$VaultDataDir/copy-key.ps1"]
-        timeout = "30s"
+        command = ["powershell.exe", "$VaultDataDir/install-cert.ps1"]
+        timeout = "120s"
     }
 }
 "@ | Set-Content -Path $VaultConfigPath -Encoding ASCII
@@ -204,8 +218,8 @@ function Install-VaultAgentService {
 }
 
 Assert-Admin
-Install-IIS
-Install-Vault
+#Install-IIS
+#Install-Vault
 Write-CertInstallScript
 Write-DefaultAgentConfig
 

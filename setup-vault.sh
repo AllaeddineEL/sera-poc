@@ -27,7 +27,6 @@ vault write auth/approle/role/iis-role token_policies="default,vault-iis-agent" 
 
 
 vault write auth/approle/role/iis-role \
-    token_type=batch \
     secret_id_ttl=10m \
     token_ttl=20m \
     token_max_ttl=30m \
